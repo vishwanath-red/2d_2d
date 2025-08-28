@@ -146,17 +146,28 @@ static void filterByReference(
 ) {
     int R = (int)refAngles.size();
     int C = (int)refAngles[0].size();
-    vector<double> tmp(ang);
-    sort(tmp.begin(), tmp.end());
+
+    // Pair angles with original indices so sorting keeps points aligned
+    vector<pair<double,int>> angWithIdx;
+    angWithIdx.reserve(ang.size());
+    for (int i=0;i<(int)ang.size();++i) angWithIdx.emplace_back(ang[i], i);
+    sort(angWithIdx.begin(), angWithIdx.end(), [](const auto& a, const auto& b){return a.first < b.first;});
+
+    // Build sorted angle list
+    vector<double> sortedAng;
+    sortedAng.reserve(angWithIdx.size());
+    for (auto& p : angWithIdx) sortedAng.push_back(p.first);
+
     for (int c=0;c<C;++c) {
         vector<int> look(R);
         for (int r=0;r<R;++r) look[r] = (int)refAngles[r][c];
-        auto idxs = intersectRounded(tmp, look, useRound);
-        if ((int)idxs.size() > R/2) {
+        auto posInSorted = intersectRounded(sortedAng, look, useRound); // positions in sortedAng
+        if ((int)posInSorted.size() > R/2) {
             outP.clear(); outAng.clear();
-            for (int i : idxs) {
-                outP.push_back(P[i]);
-                outAng.push_back(tmp[i]);
+            for (int pos : posInSorted) {
+                int origIdx = angWithIdx[pos].second;
+                outP.push_back(P[origIdx]);
+                outAng.push_back(sortedAng[pos]);
             }
             return;
         }
@@ -261,7 +272,7 @@ static vector<LabeledPoint> icp_stream(
     // 2) filter raw ICP ≥250 (matching MATLAB logic)
     vector<Vec3d> icpFid;
     for (auto &r : icpRaw) {
-        if (r[0] >= 240.0) {  // Using 240 threshold (more permissive than MATLAB's 250)
+        if (r[0] >= 240.0) {  // Match MATLAB threshold exactly
             icpFid.push_back(r);
         }
     }
@@ -298,8 +309,9 @@ static vector<LabeledPoint> icp_stream(
     filterByReference(p1, ang1, ref1, true, p1f, a1f);
     refineByRms(p1f, a1f, ref1);
 
-    auto rms1 = computeRmsToRef(a1f, ref1);
-    int bestRef1 = (int)(min_element(rms1.begin(),rms1.end())-rms1.begin());
+    // Choose best reference column using all plate1 angles (ang1) for robustness
+    auto rms1All = computeRmsToRef(ang1, ref1);
+    int bestRef1All = (int)(min_element(rms1All.begin(),rms1All.end()) - rms1All.begin());
 
     static const int P1idx[6][9] = {
       {5,4,6,3,7,2,1,8,9},
@@ -310,15 +322,30 @@ static vector<LabeledPoint> icp_stream(
       {9,1,8,2,7,3,6,4,5}
     };
 
-    vector<LabeledPoint> plate1Final;
-    safe_reserve(plate1Final, p1f.size());
-    for (size_t i=0;i<a1f.size();++i) {
+    // Map ALL plate1 hull points using nearest reference angle, keeping one per label by best fit
+    vector<int> bestIdxPerLabel(18, -1);            // labels 1..9 used
+    vector<double> bestDiffPerLabel(18, 1e12);
+
+    for (size_t i=0;i<p1.size();++i) {
+        double angle = ang1[i];
+        int bestR = -1; double bestD = 1e12;
         for (int r=0;r<9;++r) {
-            double refA = ref1[r][bestRef1];
-            if (a1f[i] > refA-3 && a1f[i] < refA+3) {
-                plate1Final.push_back({static_cast<float>(p1f[i].x), static_cast<float>(p1f[i].y), P1idx[bestRef1][r]});
-                break;
-            }
+            double d = fabs(angle - ref1[r][bestRef1All]);
+            if (d < bestD) { bestD = d; bestR = r; }
+        }
+        int label = P1idx[bestRef1All][bestR];
+        if (label>=1 && label<=9 && bestD < bestDiffPerLabel[label]) {
+            bestDiffPerLabel[label] = bestD;
+            bestIdxPerLabel[label] = (int)i;
+        }
+    }
+
+    vector<LabeledPoint> plate1Final;
+    plate1Final.reserve(9);
+    for (int lbl=1; lbl<=9; ++lbl) {
+        int idx = bestIdxPerLabel[lbl];
+        if (idx >= 0) {
+            plate1Final.push_back({(float)p1[idx].x, (float)p1[idx].y, lbl});
         }
     }
 
@@ -382,11 +409,11 @@ static vector<LabeledPoint> icp_stream(
     
     // Compute angles between ICP fiducials and plate1 points (MATLAB lines 681-703)
     // icpOrdAng(i,k) = angle between icpFid[i] and plate1Final[k]
-    // Note: MATLAB uses size(icpFid,1)-1 but we need all 6 ICP fiducials for complete matching
-    vector<vector<double>> icpOrdAng(numIcpFid, vector<double>(K, 0.0));
+    // MATLAB uses size(icpFid,1)-1; skip the last ICP fiducial for angle matching
+    vector<vector<double>> icpOrdAng(max(0,numIcpFid-1), vector<double>(K, 0.0));
     for (int k=0; k<K; ++k) {
         Point2d plate1Pt(plate1Final[k].x, plate1Final[k].y);
-        for (int i=0; i<numIcpFid; ++i) {  // Changed from numIcpFid-1 to numIcpFid
+        for (int i=0; i<numIcpFid-1; ++i) {
             Point2d icpPt(icpFid[i][1], icpFid[i][2]);
             
             Point2d n1 = normalizeVec(icpPt - Centre);
@@ -405,48 +432,34 @@ static vector<LabeledPoint> icp_stream(
       {175, 168, 145, 138, 123, 170, 164, 177, 171}  // Row 5 of each reference column
     };
 
-    // Find best matching column (MATLAB lines 720-748)
+    // Find best matching (k, refCol) pair by minimum RMS (align with MATLAB loop using disComp)
     int bestRefCol = 0;
-    double minRms = 1e12;
-    bool foundMatch = false;
-    
-    for (int k=0; k<K && !foundMatch; ++k) {
-        // Extract column k from icpOrdAng
-        vector<double> colAngles(numIcpFid-1);
-        for (int i=0; i<numIcpFid-1; ++i) {
-            colAngles[i] = icpOrdAng[i][k];
-        }
+    int bestK = 0;
+    double bestRms = 1e12;
+
+    for (int k=0; k<K; ++k) {
+        // Extract and sort column k
+        vector<double> colAngles(max(0,numIcpFid-1));
+        for (int i=0; i<numIcpFid-1; ++i) colAngles[i] = icpOrdAng[i][k];
         sort(colAngles.begin(), colAngles.end());
-        
-        // Test against each reference column
-        for (int refCol=0; refCol<9; ++refCol) {
-            // Use nearestpoint logic (MATLAB line 731)
+
+        // Compare against each of the 6 reference columns
+        for (int refCol=0; refCol<6; ++refCol) {
             vector<double> refAngles(6);
-            for (int r=0; r<6; ++r) {
-                refAngles[r] = icpOrdAngRef[r][refCol];  // Fixed indexing: row, column
-            }
-            
+            for (int r=0; r<6; ++r) refAngles[r] = icpOrdAngRef[r][refCol];
+
             auto missPoints = nearestpoint(colAngles, refAngles);
-            vector<double> newRefPoints;
-            safe_reserve(newRefPoints, missPoints.size());
-            for (int idx : missPoints) {
-                newRefPoints.push_back(refAngles[idx]);
-            }
-            
-            // Compute RMS as in MATLAB line 733
+            vector<double> newRefPoints; safe_reserve(newRefPoints, missPoints.size());
+            for (int idx : missPoints) newRefPoints.push_back(refAngles[idx]);
+
             double rms = 0.0;
             for (int i=0; i<(int)min(colAngles.size(), newRefPoints.size()); ++i) {
                 double diff = newRefPoints[i] - colAngles[i];
                 rms += diff * diff;
             }
             rms = sqrt(rms);
-            
-            if (rms < 3.0) {  // MATLAB line 738: if min(disComp) < 3
-                minRms = rms;
-                bestRefCol = refCol;
-                foundMatch = true;
-                break;
-            }
+
+            if (rms < bestRms) { bestRms = rms; bestRefCol = refCol; bestK = k; }
         }
     }
 
@@ -462,45 +475,36 @@ static vector<LabeledPoint> icp_stream(
 
     vector<LabeledPoint> icpPlatFid;
     
-    if (foundMatch) {
-        // Use the first column of icpOrdAng for angle matching (MATLAB line 771)
-        // This is correct - MATLAB uses icpOrdAng(i,1) which is the first column
-        vector<double> icpAngles(numIcpFid-1);
-        for (int i=0; i<numIcpFid-1; ++i) {
-            icpAngles[i] = icpOrdAng[i][0];  // Use first column as in MATLAB
-        }
-        
-        // Match each ICP angle to reference angles (MATLAB lines 771-804)
+    // Always perform ICP mapping with the best (k, refCol) pair
+    {
+        // Use the bestK column for angle matching (mirrors MATLAB sorting by icpAng then using that alignment)
+        vector<double> icpAngles(max(0,numIcpFid-1));
+        for (int i=0; i<numIcpFid-1; ++i) icpAngles[i] = icpOrdAng[i][bestK];
+
         for (int i=0; i<numIcpFid-1; ++i) {
             double angle = icpAngles[i];
-            
-            bool matched = false;
-            // Try to match with reference angles (tolerance ±10 for better matching)
             for (int r=0; r<6; ++r) {
-                double refAngle = icpOrdAngRef[r][bestRefCol];  // Fixed indexing: row, column
-                if (angle > refAngle-3 && angle < refAngle+3) {
-                    // Get the corresponding index from icpIdxOrd and add 17 (MATLAB line 807)
-                    int icpIdx = icpIdxOrd[r][bestRefCol] + 17;  // Fixed indexing: row, column
-                    
+                double refAngle = icpOrdAngRef[r][bestRefCol];
+                if (angle > refAngle-2 && angle < refAngle+2) { // ±2 tolerance
+                    int icpIdx = icpIdxOrd[r][bestRefCol] + 17;
                     icpPlatFid.push_back({
-                        static_cast<float>(icpFid[i][1]), 
-                        static_cast<float>(icpFid[i][2]), 
+                        static_cast<float>(icpFid[i][1]),
+                        static_cast<float>(icpFid[i][2]),
                         icpIdx
                     });
-                    matched = true;
                     break;
                 }
             }
         }
-        
-        // Add the 6th ICP fiducial with label 23 (not in original MATLAB but completing the set)
-        if (numIcpFid == 6) {
-            icpPlatFid.push_back({
-                static_cast<float>(icpFid[5][1]), 
-                static_cast<float>(icpFid[5][2]), 
-                23
-            });
-        }
+    }
+
+    // Add the 6th ICP fiducial with label 23 (hack to complete set)
+    if (numIcpFid == 6) {
+        icpPlatFid.push_back({
+            static_cast<float>(icpFid[5][1]),
+            static_cast<float>(icpFid[5][2]),
+            23
+        });
     }
 
     // concatenate all
