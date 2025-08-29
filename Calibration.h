@@ -23,20 +23,19 @@ struct TransformationData {
 
 class Calibration {
 public:
-    // Main calibration function
+    // Main calibration function (matches maindcm.cpp call signature)
     static CalibrationResult calibrate(
         const std::string& position,
         const TransformationData& C2R,
         const TransformationData& C2D,
         const Eigen::MatrixXd& W,
         const Eigen::MatrixXd& Dpts,
-        double r,
         const std::string& path_d,
         int rewarp = 0
     );
 
 private:
-    // Helper functions
+
     static std::pair<Eigen::MatrixXd, Eigen::MatrixXd> refConversion(
         const std::string& position,
         const Eigen::MatrixXd& W,
@@ -67,6 +66,10 @@ private:
     static Eigen::Matrix3d quaternionToRotationMatrix(const std::vector<double>& q);
     static std::pair<Eigen::MatrixXd, Eigen::Matrix3d> normalise2dpts(const Eigen::MatrixXd& pts);
     static std::pair<Eigen::Matrix3d, Eigen::Matrix3d> rq3(const Eigen::Matrix3d& A);
+    static Eigen::Matrix<double, 3, 4> refineProjectionMatrix(
+        const Eigen::Matrix<double, 3, 4>& P_init,
+        const Eigen::MatrixXd& imagePoints_homogeneous,
+        const Eigen::MatrixXd& worldPoints);
     static Eigen::MatrixXd readMatrix(const std::string& filename);
     static void writeMatrix(const std::string& filename, const Eigen::MatrixXd& matrix, 
                            const std::string& delimiter = " ", int precision = 6);
@@ -77,8 +80,14 @@ private:
                              const std::string& position);
     static void appLog(const std::string& operation, const std::string& path_d);
     
-    // Load ICP fiducial data (equivalent to load icpPlatFid.mat)
-    static Eigen::MatrixXd loadIcpPlatFid();
+    // Image height determination functions
+    static double getImageHeightFromCroppedImage(const std::string& path_d);
+    static double getImageHeightFromBlob(const std::string& position, const std::string& path_d);
+    static double getImageHeight(const std::string& position, const std::string& path_d, 
+                                const Eigen::MatrixXd& icpPlatFid);
+    
+    // Load ICP fiducial data from files created by maindcm.cpp
+    static Eigen::MatrixXd loadIcpPlatFid(const std::string& path_d);
 };
 
 #endif // CALIBRATION_H

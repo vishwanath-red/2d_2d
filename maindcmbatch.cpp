@@ -195,7 +195,7 @@ int main() {
             for (const auto& row : Z3)
                 if (row.size() >= 3) icpFidVec.emplace_back(row[1], row[2]);
 
-            PlateFiducials plateResult = plate12icp(blobRes.binaryBlobImage, C, icpFidVec);
+            PlateFiducials plateResult = plate12icp(blobRes.binaryBlobImage, C, icpFidVec, centers, radii);
             plateResult = plate12withICP_post(plateResult, Z3, C);
 
             // Save results with labels

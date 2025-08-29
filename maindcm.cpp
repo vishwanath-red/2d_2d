@@ -88,7 +88,7 @@ void drawPoints(Mat& img, const vector<Point2f>& points, Scalar color, int radiu
 }
 
 // Function to perform calibration using JSON data
-CalibrationResult performCalibrationFromJSON(const std::string& jsonPath, const std::string& path_d, double r) {
+CalibrationResult performCalibrationFromJSON(const std::string& jsonPath, const std::string& path_d) {
     try {
         // Read JSON file
         std::ifstream jsonFile(jsonPath);
@@ -158,9 +158,9 @@ CalibrationResult performCalibrationFromJSON(const std::string& jsonPath, const 
         std::cout << "World Points: " << num_world_points << " points" << std::endl;
         std::cout << "Distance Points: " << num_dist_points << " points" << std::endl;
         
-        // Perform calibration (equivalent to MATLAB call)
+        // Perform calibration
         CalibrationResult result = Calibration::calibrate(
-            position, C2R, C2D, W, Dpts, r, path_d, rewarp
+            position, C2R, C2D, W, Dpts, path_d, rewarp
         );
         
         std::cout << "Calibration Error: " << result.RPE << std::endl;
@@ -270,15 +270,16 @@ int main() {
     std::vector<std::vector<float>> Z3;
     for (auto idx : Z2idx) Z3.push_back(Z2[idx]);
 
-    std::cout << "DEBUG: Z2 size: " << Z2.size() << std::endl;
-    std::cout << "DEBUG: Z2idx size: " << Z2idx.size() << std::endl;
-    std::cout << "DEBUG: Z3 size: " << Z3.size() << std::endl;
+    // std::cout << "DEBUG: Z2 size: " << Z2.size() << std::endl;
+    // std::cout << "DEBUG: Z2idx size: " << Z2idx.size() << std::endl;
+    // std::cout << "DEBUG: Z3 size: " << Z3.size() << std::endl;
     
 
     std::ofstream icpFile("icp_2D.txt");
+    icpFile << std::fixed << std::setprecision(8);
     for (const auto& row : Z3) {
         for (size_t i = 0; i < row.size(); ++i)
-            icpFile << std::fixed << std::setprecision(6) << row[i] << (i + 1 < row.size() ? " " : "\n");
+            icpFile << row[i] << (i + 1 < row.size() ? " " : "\n");
     }
     icpFile.close();
 
@@ -286,21 +287,103 @@ int main() {
     for (const auto& row : Z3)
         if (row.size() >= 3) icpFidVec.emplace_back(row[1], row[2]);
 
-    PlateFiducials plateResult = plate12icp(blobRes.binaryBlobImage, C, icpFidVec);
+    PlateFiducials plateResult = plate12icp(blobRes.binaryBlobImage, C, icpFidVec, centers, radii);
     plateResult = plate12withICP_post(plateResult, Z3, C);
+    
+    // ========================= SAVE ICP PLAT FID FILE =========================
+    // Save icpPlatFid.txt file with ICP fiducial points (x, y, label format)
+    std::string icpPlatFid_file = output_dir + "\\icpPlatFid.txt";
+    std::ofstream icpPlatFidFile(icpPlatFid_file);
+    if (icpPlatFidFile.is_open()) {
+        icpPlatFidFile << std::fixed << std::setprecision(8);
+        for (const auto& pt : plateResult.icpPlatFid) {
+            icpPlatFidFile << pt.x << "\t" << pt.y << "\t" << static_cast<int>(pt.label) << std::endl;
+        }
+        icpPlatFidFile.close();
+        std::cout << "ICP Plat Fid data saved to: " << icpPlatFid_file << std::endl;
+    } else {
+        std::cerr << "Failed to write ICP Plat Fid file: " << icpPlatFid_file << std::endl;
+    }
+    // ========================= END SAVE ICP PLAT FID FILE =========================
 
-    // Save results
-    std::ofstream resultFile(output_dir + "/final_plate_points.txt");
+    // ========================= SAVE 2D POINTS FILE =========================
+    // Equivalent to MATLAB: xy = [platFid]; dlmwrite([path_d,'\Output','\',position, '\PD\' position '_2D.txt'],xy,'delimiter',' ','precision','%.6f');
+    
+    // Collect all fiducial points (platFid equivalent)
+    std::vector<std::vector<double>> platFid;
+    
+    // Add plate 1 points
+    for (const auto& pt : plateResult.final_plate1) {
+        platFid.push_back({pt.x, pt.y, static_cast<double>(pt.label)});
+    }
+    
+    // Add plate 2 points
+    for (const auto& pt : plateResult.final_plate2) {
+        platFid.push_back({pt.x, pt.y, static_cast<double>(pt.label)});
+    }
+    
+    // Add ICP points
+    for (const auto& pt : plateResult.icpPlatFid) {
+        platFid.push_back({pt.x, pt.y, static_cast<double>(pt.label)});
+    }
+    
+    // Create directory structure for 2D points file
+    std::string pd_dir = output_dir + "\\Output\\" + position + "\\PD";
+    std::filesystem::create_directories(pd_dir);
+    
+    // Write 2D points file (equivalent to position_2D.txt)
+    std::string xy_file = pd_dir + "\\" + position + "_2D.txt";
+    std::ofstream xyFile(xy_file);
+    if (xyFile.is_open()) {
+        xyFile << std::fixed << std::setprecision(8); // higher precision like MATLAB doubles
+        for (const auto& point : platFid) {
+            xyFile << point[0] << " " << point[1] << " " << static_cast<int>(point[2]) << std::endl;
+        }
+        xyFile.close();
+        std::cout << "2D points saved to: " << xy_file << std::endl;
+    } else {
+        std::cerr << "Failed to write 2D points file: " << xy_file << std::endl;
+    }
+    
+    // Also save the binary blob image for registration check
+    std::string bw_file = pd_dir + "\\" + position + "bw.png";
+    cv::imwrite(bw_file, blobRes.binaryBlobImage);
+    std::cout << "Binary blob image saved to: " << bw_file << std::endl;
+    
+    // ========================= END SAVE 2D POINTS FILE =========================
+
+    // Save results (derived from combined fiducials to match PNG exactly)
+    std::ofstream resultFile(output_dir + "\\final_plate_points.txt");
+
+    struct XYZ { double x; double y; int label; };
+    std::vector<XYZ> plate1Out, plate2Out, icpOut;
+
+    // Partition by label ranges: 1–9 = Plate1, 10–17 = Plate2, 18–23 = ICP
+    for (const auto& p : platFid) {
+        if (p.size() < 3) continue;
+        XYZ v{p[0], p[1], static_cast<int>(p[2])};
+        if (v.label >= 1 && v.label <= 9)          plate1Out.push_back(v);
+        else if (v.label >= 10 && v.label <= 17)   plate2Out.push_back(v);
+        else if (v.label >= 18 && v.label <= 23)   icpOut.push_back(v);
+    }
+
+    auto byLbl = [](const XYZ& a, const XYZ& b){ return a.label < b.label; };
+    std::sort(plate1Out.begin(), plate1Out.end(), byLbl);
+    std::sort(plate2Out.begin(), plate2Out.end(), byLbl);
+    std::sort(icpOut.begin(),    icpOut.end(),    byLbl);
+
+    resultFile << std::fixed << std::setprecision(8);
+
     resultFile << "# Plate 1 Points\n";
-    for (const auto& pt : plateResult.final_plate1)
+    for (const auto& pt : plate1Out)
         resultFile << pt.x << " " << pt.y << " " << pt.label << "\n";
 
     resultFile << "\n# Plate 2 Points\n";
-    for (const auto& pt : plateResult.final_plate2)
+    for (const auto& pt : plate2Out)
         resultFile << pt.x << " " << pt.y << " " << pt.label << "\n";
 
     resultFile << "\n# ICP Points\n";
-    for (const auto& pt : plateResult.icpPlatFid)
+    for (const auto& pt : icpOut)
         resultFile << pt.x << " " << pt.y << " " << pt.label << "\n";
 
     resultFile.close();
@@ -346,105 +429,73 @@ int main() {
     std::string indexed_output = output_dir + "/indexed_fiducials.png";
     cv::imwrite(indexed_output, img_color);
 
-    // ========================= CALIBRATION SECTION =========================
-    std::cout << "\n=== STARTING CALIBRATION ===" << std::endl;
-    
-    // Configuration - equivalent to config.ErrorUB in MATLAB
-    const double ERROR_UPPER_BOUND = 5.0;  // Adjust this value as needed
-    
-    int rewarp = 0;
-    double r_param = static_cast<double>(img8u.rows);  // Use actual image height
-    
-    // appHead equivalent
-    std::cout << "CALIBRATION" << std::endl;
-    std::cout << "-----------------------------" << std::endl;
-    
-    // Extract calibration parameters from JSON
-    TransformationData C2R, C2D;
-    C2R.tx = input_SSR["Marker_Reference"]["tx"];
-    C2R.ty = input_SSR["Marker_Reference"]["ty"];
-    C2R.tz = input_SSR["Marker_Reference"]["tz"];
-    
-    // Fix JSON to vector conversion for C2R rotation
-    auto c2r_rotation_json = input_SSR["Marker_Reference"]["Rotation"];
-    C2R.rotation.clear();
-    for (const auto& val : c2r_rotation_json) {
-        C2R.rotation.push_back(val.get<double>());
-    }
-    
-    C2D.tx = input_SSR["Marker_DD"]["tx"];
-    C2D.ty = input_SSR["Marker_DD"]["ty"];
-    C2D.tz = input_SSR["Marker_DD"]["tz"];
-    
-    // Fix JSON to vector conversion for C2D rotation
-    auto c2d_rotation_json = input_SSR["Marker_DD"]["Rotation"];
-    C2D.rotation.clear();
-    for (const auto& val : c2d_rotation_json) {
-        C2D.rotation.push_back(val.get<double>());
-    }
-    
-    // Extract world points and distance points
-    auto cmm_world_points = input_SSR["CMM_WorldPoints"];
-    int num_world_points = cmm_world_points.size();
-    Eigen::MatrixXd World(num_world_points, 3);
-    
-    for (int i = 0; i < num_world_points; ++i) {
-        World(i, 0) = cmm_world_points[i][0];
-        World(i, 1) = cmm_world_points[i][1];
-        World(i, 2) = cmm_world_points[i][2];
-    }
-    
-    auto cmm_dist_points = input_SSR["CMM_Dist_pts"];
-    int num_dist_points = cmm_dist_points.size();
-    Eigen::MatrixXd Dist_pts(num_dist_points, 3);
-    
-    for (int i = 0; i < num_dist_points; ++i) {
-        Dist_pts(i, 0) = cmm_dist_points[i][0];
-        Dist_pts(i, 1) = cmm_dist_points[i][1];
-        Dist_pts(i, 2) = cmm_dist_points[i][2];
-    }
-    
-    // Perform calibration (equivalent to MATLAB Calibration call)
-    CalibrationResult calibResult = Calibration::calibrate(
-        position, C2R, C2D, World, Dist_pts, r_param, output_dir, rewarp
-    );
-    
-    std::cout << "Calibration Error: " << calibResult.RPE << std::endl;
-    
-    // Create output JSON structure (equivalent to output_SSR in MATLAB)
-    json output_SSR = input_SSR;  // Start with input data
-    
-    // Check error threshold and proceed accordingly
-    if (calibResult.RPE < ERROR_UPPER_BOUND) {
-        std::cout << "Calibration successful - Error within bounds" << std::endl;
-        
-        // TODO: Add Imageinpaint equivalent here if needed
-        // output_SSR = Imageinpaint(meta, position, output_SSR, path_d, rewarp);
-        std::cout << "Imageinpaint - (Not implemented yet)" << std::endl;
-        
-        output_SSR["Status"] = "SUCCESS";
-        output_SSR["ErrorMessage"] = "";
-        output_SSR["RPE"] = calibResult.RPE;
-        
-        // Add calibration matrix to output
-        std::vector<std::vector<double>> resultMatrix(4, std::vector<double>(4));
-        for (int i = 0; i < 4; ++i) {
-            for (int j = 0; j < 4; ++j) {
-                resultMatrix[i][j] = calibResult.Result_Matrix(i, j);
-            }
-        }
-        output_SSR["Result_Matrix"] = resultMatrix;
-        
-    } else {
-        std::cout << "Calibration failed - Error exceeds threshold" << std::endl;
-        
-        output_SSR["Status"] = "FAILURE";
-        output_SSR["ErrorMessage"] = "Calibration failed";
-        output_SSR["TwoD_Points"] = json::array();
-        output_SSR["UD_InPaint_Image"] = "Empty";
-        output_SSR["CropRoi"] = json::array();
-        output_SSR["RPE"] = -1;
-    }
+   // ========================= CALIBRATION SECTION =========================
+std::cout << "\n=== STARTING CALIBRATION ===\n"
+          << "CALIBRATION\n"
+          << "-----------------------------\n";
+
+constexpr double ERROR_UPPER_BOUND = 5.0;  
+int rewarp = 0;
+
+// --- Helper lambdas for JSON → Eigen ---
+auto jsonToMatrix = [](const json& arr) {
+    Eigen::MatrixXd mat(arr.size(), arr[0].size());
+    for (int i = 0; i < arr.size(); ++i)
+        for (int j = 0; j < arr[i].size(); ++j)
+            mat(i, j) = arr[i][j];
+    return mat;
+};
+
+auto jsonToTransform = [](const json& node) {
+    TransformationData t;
+    t.tx = node["tx"];
+    t.ty = node["ty"];
+    t.tz = node["tz"];
+    t.rotation = node["Rotation"].get<std::vector<double>>();
+    return t;
+};
+
+// --- Parse input ---
+TransformationData C2R = jsonToTransform(input_SSR["Marker_Reference"]);
+TransformationData C2D = jsonToTransform(input_SSR["Marker_DD"]);
+
+Eigen::MatrixXd World    = jsonToMatrix(input_SSR["CMM_WorldPoints"]);
+Eigen::MatrixXd Dist_pts = jsonToMatrix(input_SSR["CMM_Dist_pts"]);
+
+// --- Run calibration ---
+CalibrationResult calib = Calibration::calibrate(
+    position, C2R, C2D, World, Dist_pts, output_dir, rewarp
+);
+
+std::cout << "Calibration Error: " << calib.RPE << std::endl;
+
+// --- Prepare output JSON ---
+json output_SSR = input_SSR;
+output_SSR["RPE"] = calib.RPE;
+
+if (calib.RPE < ERROR_UPPER_BOUND) {
+    output_SSR["Status"] = "SUCCESS";
+    output_SSR["ErrorMessage"] = "";
+    output_SSR["Result_Matrix"] = std::vector<std::vector<double>>(4, std::vector<double>(4));
+
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            output_SSR["Result_Matrix"][i][j] = calib.Result_Matrix(i, j);
+
+    std::cout << "Calibration successful\n";
+    std::cout << "Imageinpaint - (Not implemented yet)\n";
+
+} else {
+    output_SSR["Status"] = "FAILURE";
+    output_SSR["ErrorMessage"] = "Calibration failed";
+    output_SSR["TwoD_Points"]   = json::array();
+    output_SSR["UD_InPaint_Image"] = "Empty";
+    output_SSR["CropRoi"] = json::array();
+    output_SSR["RPE"] = -1;
+
+    std::cout << "Calibration failed - Error exceeds threshold\n";
+}
+
     
     // Set additional output fields
     output_SSR["Type"] = position;
@@ -470,6 +521,8 @@ int main() {
     std::cout << "Original image with index numbers saved to: " << indexed_output << std::endl;
     std::cout << "Point coordinates saved to: " << output_dir + "/final_plate_points.txt" << std::endl;
     std::cout << "ICP 2D data saved to: icp_2D.txt" << std::endl;
+    std::cout << "2D fiducial points saved to: " << xy_file << std::endl;
+    std::cout << "Binary blob image saved to: " << bw_file << std::endl;
     std::cout << "Calibration output saved to: " << output_json_file << std::endl;
 
     return 0;

@@ -18,7 +18,7 @@ include_directories(
 
 # === Build target ===
 add_executable(plate12withICP
-    maindcmbatch.cpp
+    maindcm.cpp
     Center_detection.cpp
     Outlier_angle.cpp
     S_F_B.cpp
@@ -30,7 +30,7 @@ add_executable(plate12withICP
     # spline_fitting.cpp
     # dist_out_removal.cpp
     # tps.cpp
-    utils.cpp
+    #utils.cpp
     #spline_fitting.cpp
     # plate12withICP_noInputs.cpp
     kmeans.cpp
