@@ -26,6 +26,10 @@ add_executable(plate12withICP
     blob_detection.cpp
     icp_angle.cpp
     Calibration.cpp  # Added Calibration module
+    JsonCheck.cpp
+    rq3.h
+    normalise2dpts.h
+    decompose_camera.h
     #simulation_4R.cpp
     # spline_fitting.cpp
     # dist_out_removal.cpp

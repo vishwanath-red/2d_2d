@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <string>
 #include <json.hpp>
+#include "JsonCheck.h"
 #include <filesystem>
 
 #include "blob_detection.h"
@@ -191,6 +192,16 @@ int main() {
     jsonFile >> input_SSR;
     std::string dicomPath = input_SSR["Image"];
     std::string position = input_SSR["Type"];
+
+    // MATLAB-equivalent JSON validation and folder prep
+    JsonCheckResult jc = json_check_cpp(input_SSR, position, output_dir);
+    if (!jc.ok) {
+        std::cerr << "JSON validation failed: " << jc.errorMessage << std::endl;
+        return 1;
+    }
+    // Use validated/normalized fields
+    position = jc.position;
+    dicomPath = jc.imagePath;
 
     cv::Mat img8u;
     try {

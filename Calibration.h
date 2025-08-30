@@ -18,7 +18,7 @@ struct CalibrationResult {
 
 struct TransformationData {
     double tx, ty, tz;
-    std::vector<double> rotation; // quaternion [x, y, z, w]
+    std::vector<double> rotation; // quaternion [x, y, z, w] as loaded from JSON; converted to [w,x,y,z] at use site
 };
 
 class Calibration {
